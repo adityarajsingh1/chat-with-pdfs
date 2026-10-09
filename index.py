@@ -15,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
+from bm25 import BM25, rank, reciprocal_rank_fusion
+
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 BATCH = 100  # the api accepts lots of inputs per call, this keeps requests a sane size
 
@@ -33,20 +35,34 @@ def embed(texts):
 
 
 class Index:
-    def __init__(self, chunks, vectors):
+    def __init__(self, chunks, vectors=None):
         self.chunks = chunks
-        self.vectors = vectors
+        self.vectors = vectors  # None when running keyword-only
+        self.bm25 = BM25([c["text"] for c in chunks])
 
     @classmethod
     def build(cls, chunks, embed_fn=embed):
         print(f"embedding {len(chunks)} chunks...")
         return cls(chunks, embed_fn([c["text"] for c in chunks]))
 
-    def search(self, question, k=5, embed_fn=embed):
+    def search(self, question, k=5, mode="hybrid", embed_fn=embed):
+        """mode is "hybrid" (default), "embedding" or "keyword"."""
+        if self.vectors is None:
+            mode = "keyword"
+
+        keyword_scores = self.bm25.scores(question)
+        if mode == "keyword":
+            best = rank(keyword_scores)[:k]
+            return [dict(self.chunks[i], score=keyword_scores[i]) for i in best]
+
         q = embed_fn([question])[0]
-        scores = self.vectors @ q
-        best = np.argsort(scores)[::-1][:k]
-        return [dict(self.chunks[i], score=float(scores[i])) for i in best]
+        sims = self.vectors @ q
+        if mode == "embedding":
+            best = list(np.argsort(sims)[::-1][:k])
+        else:
+            best = reciprocal_rank_fusion(list(np.argsort(sims)[::-1]), rank(keyword_scores))[:k]
+        # report the cosine similarity, it's the easier number to read
+        return [dict(self.chunks[i], score=float(sims[i])) for i in best]
 
     def save(self, folder):
         folder = Path(folder)
@@ -72,8 +88,11 @@ def fingerprint(pdf_folder):
     return h.hexdigest()[:12]
 
 
-def get_index(pdf_folder, chunks_fn, embed_fn=embed):
+def get_index(pdf_folder, chunks_fn, embed_fn=embed, use_embeddings=True):
     """Load the cached index if the PDFs haven't changed, otherwise build a new one."""
+    if not use_embeddings:
+        # keyword search is cheap, no need to cache anything
+        return Index(chunks_fn(pdf_folder))
     base = Path(pdf_folder)
     cache = (base.parent if base.is_file() else base) / ".pdf-index" / fingerprint(pdf_folder)
     if (cache / "vectors.npy").exists():

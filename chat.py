@@ -21,17 +21,22 @@ def main():
     parser.add_argument("--llm", choices=answer.LLMS.keys(), default="claude",
                         help="which model writes the answers (default: claude)")
     parser.add_argument("-k", type=int, default=5, help="how many chunks to give the model (default 5)")
+    parser.add_argument("--search", choices=["hybrid", "embedding", "keyword"], default="hybrid",
+                        help="how to find relevant chunks (default: hybrid). keyword needs no OpenAI key")
     parser.add_argument("--show-sources", action="store_true", help="print the chunks that were used")
     args = parser.parse_args()
 
     if not os.path.exists(args.path):
         sys.exit(f"can't find {args.path}")
-    if not os.getenv("OPENAI_API_KEY"):
-        sys.exit("set OPENAI_API_KEY, it's needed for the embeddings")
+    use_embeddings = args.search != "keyword"
+    if use_embeddings and not os.getenv("OPENAI_API_KEY"):
+        sys.exit("set OPENAI_API_KEY for embeddings, or use --search keyword")
     if args.llm == "claude" and not os.getenv("ANTHROPIC_API_KEY"):
         sys.exit("set ANTHROPIC_API_KEY (or use --llm openai)")
+    if args.llm == "openai" and not os.getenv("OPENAI_API_KEY"):
+        sys.exit("set OPENAI_API_KEY to use --llm openai")
 
-    index = get_index(args.path, pdfs.load_folder)
+    index = get_index(args.path, pdfs.load_folder, use_embeddings=use_embeddings)
     if not index.chunks:
         sys.exit("didn't find any text in those PDFs (scanned PDFs need OCR first)")
 
@@ -48,7 +53,7 @@ def main():
         if not question:
             continue
 
-        hits = index.search(question, k=args.k)
+        hits = index.search(question, k=args.k, mode=args.search)
         if args.show_sources:
             for h in hits:
                 print(f"  · {h['source']} p.{h['page']} ({h['score']:.2f}) {h['text'][:80]}...")
